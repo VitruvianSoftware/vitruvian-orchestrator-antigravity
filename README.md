@@ -1,2 +1,93 @@
-# vitruvian-orchestrator-antigravity
-Antigravity plugin: a lead agent plans the work, specialist agents do it, and a live panel shows the plan, the board and the spend
+# vitruvian-orchestrator (Antigravity)
+
+Antigravity desktop plugin that coordinates specialist helpers across a planned engineering flow and shows live progress, spend, and team messages in a sidecar panel.
+
+## What is in this plugin
+
+- **`orchestrate` lead skill (`skills/orchestrate/SKILL.md`)**: Turns the active Antigravity session into the lead that plans across five phases (`plan` → `design` → `delegate` → `review` → `close`), resolves roles via `team`, dispatches specialist helpers, reviews their work, and closes the flow. See [How the agent team works](https://github.com/VitruvianSoftware/vitruvian-core/blob/main/docs/concepts/agent-team.md).
+- **Specialist subagents (`agents/*.md`)**: Ships role-named generic agents (`lead`, `developer`, `infrastructure`, `build`, `operations`, `qa`, `security`, `product`, `docs`, `release`) generated from `.agents/roster/generic/` so Antigravity discovers them natively (`<plugin>/agents/*.md`) in any repository. Generic agents work out of the box without Antigravity in Claude Code and OpenCode (`engine: "native"` by default; Gemini is opt-in via `engine`), while in Antigravity every role always uses `engine: "native"` and `.agents/team.json` maps roles to your own agents (such as `.agents/agents/*.md`).
+- **Live Orchestrator panel (`sidecars/panel/`)**: Shows five **Flow** cards — **Header**, **Burn-down**, **Task Board**, **Agents**, and **Spend**. Flows with no board posts, no extra channels, and no pause, retire, or kill events stay on this single **Flow** view. Once any of those appear, a tab bar adds **Board**, **Members**, **Graph**, and **Overview**.
+- **Orchestration rule (`rules/AGENTS.md`)**: Reminds the lead and helpers to report progress and surfaces the `[Orchestrator](sidecar://vitruvian-orchestrator/panel/)` pill in chat.
+
+## Shared board, tools, waking, and member states
+
+- **What the board is**: The board is a shared message list for the helpers and the lead, shown as numbered posts (`#1`, `#2`, and so on). Recipients appear as `@name` (`@all` displays as `everyone`), and replies show `↩ #<n>`.
+- **What helpers post**: Helpers post results, questions, and defect lists (plus short status notes) so teammates and the lead can read findings in one place.
+- **Tools**:
+  - `post`: Adds a message to the board with optional recipients, kind (`result`, `question`, `defect`, or `note`), `replyTo` post number, and `channel` (default `main`).
+  - `board`: Reads numbered posts from the board, with optional filters for recipient, author, kind, channel, or search words. For a helper, calling `board` with no recipient (or `to: "me"`) returns posts addressed to that helper or to everyone.
+  - `channel`: Lists channels (`action: "list"`, open to all) or creates and archives channels (`action: "create"` or `"archive"`, lead-only, up to 20 channels).
+  - `team`: Reads the repository's optional `.agents/team.json` file (if present) and returns the resolved roles, agents, dispatch ids, `engine`, models, and project notes.
+  - `team_setup` and `team-setup` skill (`skills/team-setup/SKILL.md`): Creates a starter `.agents/team.json` (and optional `team-<role>` starter agents) with `init`, or syncs explicit model and effort settings into the repository's agent files with `sync`.
+  - `step`: Called by a helper to report step progress (`done`, `total`, `note`) or a pause reason (`paused: "quota"` or `paused: "error"`, plus an optional `detail` such as `429 Resource Exhausted`).
+  - `progress`: Called only by the lead to publish or update the task plan, change phases, accept or return tasks, close the flow, or `retire` / `kill` a helper.
+- **How waking works**: When a post mentions a waiting helper (`@name`), Antigravity delivers a wake straight to the helper's own conversation once for that mention (`@lead` wakes the lead conversation). Only the lead's `@all` wakes everyone who is waiting; `@all` from a helper never broadcasts wakes. Every forwarded post is clearly marked and shown to other agents as helper content, never as instructions from the user, the lead, or the system.
+- **Member states**:
+  - `working`: The helper is actively running its turn or a background task.
+  - `waiting`: The helper finished its turn and is standing by so an `@mention` on the board can wake it.
+  - `paused`: The helper reported a pause reason (`quota` or `error`). While the flow is open, its row shows an amber `paused: <reason>` badge in place of `running`, and the **Members** tab shows its pause detail whether or not it has posted.
+  - `retired`: The helper is done for good — either retired early by the lead with `progress` (`retire`) or finished when the flow closes. Retired helpers are grouped under **Retired** in the **Members** tab and never change the status badge on **Flow** agent rows. A helper's second and later runs on the same task show `round N` next to the task in the **Members** tab.
+  - `killed`: The lead marked the helper as killed with `progress` (`kill`). It shows a red `killed` badge and is no longer woken by board posts. This does not stop a helper that is still running; the lead stops it in the tool itself.
+
+## Who talks to whom
+
+The **Graph** tab shows helpers as points on a circle, with a line for each pair that mention each other. The more two helpers mention each other, the thicker their line, and the line shows the count. Replay controls let you review interactions over time with play/pause, step, a slider, and `Live`. `Hide inactive` hides killed or retired helpers.
+
+## Choosing a Gemini model per task
+
+The lead can set a model on a task and put `Gemini model: <id>` in the brief; the helper uses it instead of its default. Low, lite and flash-lo models are refused and the default is used; the panel shows a warning on the task.
+
+## A worktree per helper
+
+The lead can give a task its own worktree and put `Worktree: <branch>` in the brief; the helper creates it with the repo's worktree tool (or reuses it), works there, reports the path, and the panel shows it on the helper. A bad name is refused: the helper asks the lead and stops, and the panel shows a warning. Give parallel helpers on the same repository separate worktrees.
+
+## Overview
+
+The **Overview** tab gives a data-only snapshot of the flow and shows only non-empty cards: active and standing-by helpers (one row per helper from its latest run, showing its latest step note or else its latest post), open questions (questions with no later `replyTo` answer), open defects, and quiet or stalled runs. A defect is closed by a later `result` post from the same author that sets `replyTo` to that defect's post number; as a fallback when `replyTo` is omitted, a later `result` post from the same author closes the defect when it mentions the defect's worker recipient and either the author has only one task or both posts name the same unambiguous task (a defect addressed only to `@lead`, or one from an author with several tasks and no explicit task number, is closed only by `replyTo`).
+
+## Channels
+
+Posts carry a `channel` (`main` by default; channel names match `[a-z0-9][a-z0-9-]{0,31}`, up to 20 channels). Only the lead can create or archive channels with `channel`; everyone can list channels, filter `board` by `channel` (an unknown channel is an error that lists the real ones; archived channels can still be read), and post to open channels. Posting to an unknown or archived channel is rejected with an error, and `main` cannot be archived. Once a non-`main` channel exists, channel chips (`All`, `#main`, `#<name>`) appear above the **Board** tab. When the lead puts `Channel: <name>` in a task brief, the helper posts in that channel.
+
+## Safety
+
+The model, worktree, and channel are only ever read from the lead's brief, never from board posts, and are checked before use.
+
+## Opening the panel
+
+Click the sidecar pill surfaced in chat:
+
+`[Orchestrator](sidecar://vitruvian-orchestrator/panel/)`
+
+Or open **Orchestrator** from the Antigravity auxiliary side pane. For standalone local testing:
+
+```bash
+PORT=47811 VITRUVIAN_ORCH_DIR="$(pwd)/apps/antigravity/plugins/vitruvian-orchestrator/sidecars/panel/testdata" \
+  node apps/antigravity/plugins/vitruvian-orchestrator/sidecars/panel/main.mjs
+```
+
+## Install
+
+```bash
+agy plugin install https://github.com/VitruvianSoftware/vitruvian-orchestrator-antigravity
+```
+
+That repository is a read-only copy of this folder, published from `vitruvian-core`. Each
+release is tagged there as `v<version>` with notes from [CHANGELOG.md](./CHANGELOG.md).
+Open issues and pull requests against
+[vitruvian-core](https://github.com/VitruvianSoftware/vitruvian-core).
+
+To run it from a checkout of `vitruvian-core` instead, link this folder into Antigravity's
+plugin folder:
+
+```bash
+ln -s "$(pwd)/apps/antigravity/plugins/vitruvian-orchestrator" ~/.gemini/config/plugins/vitruvian-orchestrator
+```
+
+## Credits
+
+Adapted from [`savvy-fleet`](https://github.com/VitruvianSoftware/vitruvian-core/tree/main/apps/antigravity/plugins/savvy-fleet) (MIT, VitruvianSoftware) for the Antigravity sidecar layout and powered by [`packages/orchestrator-core`](https://github.com/VitruvianSoftware/vitruvian-core/tree/main/packages/orchestrator-core).
+
+## Subdirectories & Boundaries
+- [mcp](./mcp/README.md): MCP server exposing `progress`, `step`, `post`, `board`, `channel`, and `team`.
+- [sidecars](./sidecars/README.md): Sidecar UI and background wake watcher for the Orchestrator panel.

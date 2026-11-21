@@ -1,0 +1,2109 @@
+/**
+ * Copyright (c) 2026 VitruvianSoftware
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+const sidecar = window.sidecar;
+const $ = (id) => document.getElementById(id);
+
+const PHASES = ["plan", "design", "delegate", "review", "close"];
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+const MASCOTS = Object.assign(Object.create(null), {
+  lead: "◈",
+  beacon: "◈",
+  wren: "🐦",
+  atlas: "🌐",
+  ridge: "⛰",
+  forge: "⚒",
+  scout: "🔭",
+  aegis: "🛡",
+  compass: "🧭",
+  pace: "⏱",
+  quill: "✒",
+});
+
+function getMascot(agent) {
+  return typeof agent === "string" &&
+    Object.prototype.hasOwnProperty.call(MASCOTS, agent)
+    ? MASCOTS[agent]
+    : "●";
+}
+
+function formatAgentLabel(agent, agentRoles) {
+  const clean = String(agent ?? "");
+  if (!clean || !agentRoles || typeof agentRoles !== "object") return clean;
+  const norm = clean.trim().toLowerCase();
+  const bare = norm.includes(":")
+    ? norm.slice(norm.lastIndexOf(":") + 1)
+    : norm;
+  const ownRole = (key) =>
+    Object.prototype.hasOwnProperty.call(agentRoles, key) &&
+    typeof agentRoles[key] === "string"
+      ? agentRoles[key]
+      : "";
+  const role = ownRole(norm) || ownRole(bare);
+  if (!role || role === bare || role === norm) return clean;
+  return `${clean} · ${role}`;
+}
+
+function resolveStateAgentRoles(state) {
+  if (Array.isArray(state?.flow?.team)) {
+    const map = Object.create(null);
+    for (const entry of state.flow.team) {
+      if (!entry || typeof entry !== "object") continue;
+      const agent =
+        typeof entry.agent === "string" ? entry.agent.trim().toLowerCase() : "";
+      const role =
+        typeof entry.role === "string" ? entry.role.trim().toLowerCase() : "";
+      if (
+        !agent ||
+        !role ||
+        agent === role ||
+        Object.prototype.hasOwnProperty.call(map, agent)
+      ) {
+        continue;
+      }
+      map[agent] = role;
+    }
+    return map;
+  }
+  return state?.agentRoles && typeof state.agentRoles === "object"
+    ? state.agentRoles
+    : Object.create(null);
+}
+
+async function callApi(path) {
+  const fetcher = sidecar?.fetch
+    ? sidecar.fetch.bind(sidecar)
+    : window.fetch.bind(window);
+  const res = await fetcher(path, { method: "GET" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `${res.status} ${res.statusText}`);
+  }
+  return data;
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [name, value] of Object.entries(attrs)) {
+    if (name === "class") node.className = value;
+    else if (name === "onclick" && typeof value === "function") {
+      node.addEventListener("click", value);
+    } else if (value !== false && value !== undefined && value !== null) {
+      node.setAttribute(name, value === true ? "" : String(value));
+    }
+  }
+  for (const child of children) {
+    if (child !== null && child !== undefined) node.append(child);
+  }
+  return node;
+}
+
+function svgEl(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attrs)) {
+    if (value !== undefined && value !== null) {
+      node.setAttribute(name, String(value));
+    }
+  }
+  for (const child of children) {
+    if (child !== null && child !== undefined) node.append(child);
+  }
+  return node;
+}
+
+function formatUsd(usd) {
+  const val = Number(usd ?? 0) || 0;
+  return `$${val < 10 ? val.toFixed(2) : val.toFixed(1)}`;
+}
+
+function formatTokens(count) {
+  const n = Math.max(0, Number(count ?? 0) || 0);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return `${Math.round(n)}`;
+}
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (totalSec < 60) {
+    return `${totalSec}s`;
+  }
+  if (totalSec < 3600) {
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}m ${String(s).padStart(2, "0")}s`;
+  }
+  if (totalSec < 86400) {
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    return `${h}h ${String(m).padStart(2, "0")}m`;
+  }
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  return `${d}d ${h}h`;
+}
+
+function statusTone(state) {
+  switch (state) {
+    case "accepted":
+    case "done":
+      return "status-green";
+    case "running":
+      return "status-blue";
+    case "review":
+    case "waiting":
+      return "status-amber";
+    case "returned":
+    case "error":
+      return "status-red";
+    default:
+      return "status-neutral";
+  }
+}
+
+function renderPhasePills(currentPhase, isClosed) {
+  const container = $("phase-pills");
+  container.replaceChildren();
+  const currentIdx = PHASES.indexOf(currentPhase);
+
+  for (let i = 0; i < PHASES.length; i += 1) {
+    const phase = PHASES[i];
+    const isDone = isClosed || (currentIdx !== -1 && i < currentIdx);
+    const isCurrent = !isClosed && i === currentIdx;
+    const cls = isCurrent
+      ? "phase-pill current"
+      : isDone
+        ? "phase-pill done"
+        : "phase-pill";
+    const label = isDone ? `✓ ${phase}` : phase;
+    container.append(el("span", { class: cls }, label));
+  }
+}
+
+function renderBurnDownSvg(burn, totalTasks) {
+  const container = $("burndown-container");
+  container.replaceChildren();
+
+  const points = Array.isArray(burn?.points) ? burn.points : [];
+  const ideal = Array.isArray(burn?.ideal) ? burn.ideal : [];
+  const replans = Array.isArray(burn?.replans) ? burn.replans : [];
+
+  if (points.length === 0) {
+    container.append(
+      el("p", { class: "muted small" }, "No burn-down history points yet."),
+    );
+    return;
+  }
+
+  const width = Math.max(240, Math.round(container.clientWidth || 360));
+  const height = 116;
+  const padLeft = 28;
+  const padRight = 16;
+  const padTop = 14;
+  const padBottom = 22;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+
+  const allTimes = [
+    ...points.map((p) => p.at),
+    ...ideal.map((p) => p.at),
+    ...replans.map((r) => r.at),
+  ].filter((t) => typeof t === "number" && Number.isFinite(t));
+
+  const minAt = allTimes.length > 0 ? Math.min(...allTimes) : 0;
+  const maxAt = allTimes.length > 0 ? Math.max(...allTimes) : minAt;
+  const spanAt = Math.max(1, maxAt - minAt);
+
+  const maxRem = Math.max(
+    1,
+    totalTasks || 1,
+    ...points.map((p) => p.remaining),
+    ...ideal.map((p) => p.remaining),
+    ...replans.map((r) => r.total),
+  );
+
+  const toX = (at, idx, len) => {
+    if (maxAt === minAt) {
+      if (len <= 1) return padLeft + plotW / 2;
+      return padLeft + (idx / (len - 1)) * plotW;
+    }
+    return padLeft + ((at - minAt) / spanAt) * plotW;
+  };
+  const toY = (val) => padTop + (1 - Math.max(0, val) / maxRem) * plotH;
+
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    width: String(width),
+    height: String(height),
+    class: "burndown-svg",
+    role: "img",
+    "aria-label": "Remaining tasks burn-down chart",
+  });
+
+  // Horizontal baseline & top guide
+  svg.append(
+    svgEl("line", {
+      x1: padLeft,
+      y1: toY(maxRem),
+      x2: width - padRight,
+      y2: toY(maxRem),
+      class: "burndown-grid",
+    }),
+    svgEl("line", {
+      x1: padLeft,
+      y1: toY(0),
+      x2: width - padRight,
+      y2: toY(0),
+      class: "burndown-grid",
+    }),
+    svgEl(
+      "text",
+      {
+        x: padLeft - 6,
+        y: toY(maxRem) + 4,
+        "text-anchor": "end",
+        class: "burndown-axis-text",
+      },
+      String(maxRem),
+    ),
+    svgEl(
+      "text",
+      {
+        x: padLeft - 6,
+        y: toY(0) + 4,
+        "text-anchor": "end",
+        class: "burndown-axis-text",
+      },
+      "0",
+    ),
+  );
+
+  // Dashed ideal line
+  if (ideal.length >= 2) {
+    const x1 = toX(ideal[0].at, 0, 2);
+    const y1 = toY(ideal[0].remaining);
+    const x2 = maxAt === minAt ? width - padRight : toX(ideal[1].at, 1, 2);
+    const y2 = toY(ideal[1].remaining);
+    svg.append(
+      svgEl("line", {
+        x1: x1.toFixed(1),
+        y1: y1.toFixed(1),
+        x2: x2.toFixed(1),
+        y2: y2.toFixed(1),
+        class: "burndown-ideal",
+        "stroke-dasharray": "4 4",
+      }),
+    );
+  }
+
+  // Re-plan vertical markers
+  for (let i = 0; i < replans.length; i += 1) {
+    const rp = replans[i];
+    const rx = toX(rp.at, i, replans.length);
+    const ry = toY(rp.total);
+    svg.append(
+      svgEl("line", {
+        x1: rx.toFixed(1),
+        y1: padTop,
+        x2: rx.toFixed(1),
+        y2: height - padBottom,
+        class: "burndown-replan-line",
+        "stroke-dasharray": "2 2",
+      }),
+      svgEl("polygon", {
+        points: `${rx.toFixed(1)},${(ry - 4).toFixed(1)} ${(rx + 4).toFixed(1)},${ry.toFixed(1)} ${rx.toFixed(1)},${(ry + 4).toFixed(1)} ${(rx - 4).toFixed(1)},${ry.toFixed(1)}`,
+        class: "burndown-replan-marker",
+      }),
+      svgEl(
+        "text",
+        {
+          x: rx.toFixed(1),
+          y: height - 5,
+          // Anchor toward the inside so a re-plan near either edge is not clipped.
+          "text-anchor":
+            rx > width * 0.8 ? "end" : rx < width * 0.2 ? "start" : "middle",
+          class: "burndown-replan-text",
+        },
+        `re-plan (${rp.total})`,
+      ),
+    );
+  }
+
+  // Actual remaining polyline & points
+  const polyCoords = points
+    .map((p, idx) => {
+      const x = toX(p.at, idx, points.length);
+      const y = toY(p.remaining);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  if (points.length > 1) {
+    svg.append(
+      svgEl("polyline", {
+        points: polyCoords,
+        fill: "none",
+        class: "burndown-actual",
+      }),
+    );
+  }
+
+  for (let i = 0; i < points.length; i += 1) {
+    const p = points[i];
+    const cx = toX(p.at, i, points.length);
+    const cy = toY(p.remaining);
+    svg.append(
+      svgEl("circle", {
+        cx: cx.toFixed(1),
+        cy: cy.toFixed(1),
+        r: 3.5,
+        class: "burndown-point",
+      }),
+    );
+  }
+
+  container.append(svg);
+}
+
+function renderTaskBoard(rows) {
+  const container = $("task-board");
+  container.replaceChildren();
+  $("tasks-caption").textContent =
+    `${rows.length} task${rows.length === 1 ? "" : "s"}`;
+
+  for (const row of rows) {
+    const tone = statusTone(row.state);
+    const metaBadges = [
+      el("span", { class: "meta-chip mono" }, row.specialist || "wren"),
+      el("span", { class: "meta-chip tier-chip" }, row.tier || "core"),
+    ];
+    if (row.model) {
+      metaBadges.push(el("span", { class: "meta-chip mono" }, row.model));
+    }
+    if (row.worktree) {
+      metaBadges.push(
+        el("span", { class: "meta-chip mono" }, `⎇ ${row.worktree}`),
+      );
+    }
+    if (row.warning) {
+      metaBadges.push(
+        el(
+          "span",
+          { class: "meta-chip status-amber", title: row.warning },
+          row.warning,
+        ),
+      );
+    }
+    if (row.round > 0) {
+      metaBadges.push(
+        el("span", { class: "meta-chip status-red" }, `round ${row.round}`),
+      );
+    }
+    if (Array.isArray(row.waitingOn) && row.waitingOn.length > 0) {
+      metaBadges.push(
+        el(
+          "span",
+          { class: "meta-chip status-amber" },
+          `waits on ${row.waitingOn.map((n) => `#${n}`).join(", ")}`,
+        ),
+      );
+    }
+
+    const item = el(
+      "div",
+      { class: "row-item task-row" },
+      el(
+        "div",
+        { class: "row-main" },
+        el("span", { class: "task-num mono muted" }, `#${row.n}`),
+        el("span", { class: "row-title" }, row.title),
+      ),
+      el(
+        "div",
+        { class: "row-meta" },
+        ...metaBadges,
+        el("span", { class: `status-badge ${tone}` }, row.state),
+      ),
+    );
+    container.append(item);
+  }
+}
+
+function renderAgents(runs, members, agentRoles = Object.create(null)) {
+  const container = $("agents-list");
+  container.replaceChildren();
+  $("agents-empty").hidden = runs.length > 0;
+  $("agents-caption").textContent =
+    `${runs.length} run${runs.length === 1 ? "" : "s"}`;
+
+  const memberById = new Map();
+  for (const group of [
+    members?.active,
+    members?.standingBy,
+    members?.retired,
+  ]) {
+    if (!Array.isArray(group)) continue;
+    for (const m of group) {
+      if (m && typeof m.id === "string") {
+        memberById.set(m.id, m);
+      }
+    }
+  }
+
+  for (const run of runs) {
+    const mascot = getMascot(run.agent);
+    const tone = statusTone(run.status);
+    const member = memberById.get(run.id) || null;
+    const baseModel = run.model || "inherit";
+    const taskModel = run.taskModel || member?.taskModel || null;
+    const effectiveDelegate = run.delegate || taskModel || null;
+    const modelCore =
+      effectiveDelegate && effectiveDelegate !== baseModel
+        ? `${baseModel} → ${effectiveDelegate}`
+        : baseModel;
+    const modelLabel = run.effort ? `${modelCore} · ${run.effort}` : modelCore;
+
+    let progressLabel = "—";
+    if (
+      run.steps &&
+      typeof run.steps.total === "number" &&
+      run.steps.total > 0
+    ) {
+      progressLabel = `${run.steps.done}/${run.steps.total}${run.steps.note ? ` · ${run.steps.note}` : ""}`;
+    } else if (typeof run.contextPct === "number") {
+      progressLabel = `${Math.round(run.contextPct)}% ctx`;
+    }
+
+    const costLabel =
+      typeof run.cost === "number" ? `est. ${formatUsd(run.cost)}` : "unpriced";
+    const tokensLabel = `${formatTokens(run.totalTokens ?? 0)} tkn`;
+    const elapsedLabel = formatElapsed(run.elapsedMs ?? 0);
+    const stallBadge =
+      run.status === "running" &&
+      (run.stallState === "quiet" ||
+        run.stallState === "waiting" ||
+        run.stallState === "stalled")
+        ? el(
+            "span",
+            {
+              class: `status-badge stall-badge ${
+                run.stallState === "stalled"
+                  ? "status-red"
+                  : run.stallState === "waiting"
+                    ? "status-blue"
+                    : "status-amber"
+              }`,
+            },
+            run.stallState,
+          )
+        : null;
+
+    const worktree = run.worktree || member?.worktree || null;
+    const isPausedOrKilled =
+      member?.state === "paused" || member?.state === "killed";
+    const statusBadge =
+      member?.state === "paused"
+        ? el(
+            "span",
+            {
+              class: "status-badge status-amber",
+              title: member.detail || undefined,
+            },
+            `paused: ${member.reason || "error"}`,
+          )
+        : member?.state === "killed"
+          ? el("span", { class: "status-badge status-red" }, "killed")
+          : el("span", { class: `status-badge ${tone}` }, run.status);
+
+    const row = el(
+      "div",
+      { class: "row-item agent-row" },
+      el(
+        "div",
+        { class: "row-main" },
+        el("span", { class: "agent-mascot", "aria-hidden": "true" }, mascot),
+        el(
+          "span",
+          { class: "row-title" },
+          formatAgentLabel(run.agent || "worker", agentRoles),
+        ),
+        run.title
+          ? el("span", { class: "muted small" }, `· ${run.title}`)
+          : null,
+      ),
+      el(
+        "div",
+        { class: "row-meta" },
+        el("span", { class: "meta-chip mono" }, modelLabel),
+        worktree
+          ? el("span", { class: "meta-chip mono" }, `⎇ ${worktree}`)
+          : null,
+        el("span", { class: "meta-chip" }, progressLabel),
+        el("span", { class: "meta-chip mono" }, tokensLabel),
+        el("span", { class: "meta-chip mono" }, costLabel),
+        el("span", { class: "meta-chip mono muted" }, elapsedLabel),
+        statusBadge,
+        isPausedOrKilled ? null : stallBadge,
+      ),
+    );
+    container.append(row);
+  }
+}
+
+function renderSpend(spendSummary) {
+  const sp = spendSummary || {
+    total: 0,
+    byModel: {},
+    lead: 0,
+    workers: 0,
+    unpriced: { runs: 0, tokens: 0 },
+  };
+  $("spend-total").textContent = `est. ${formatUsd(sp.total)}`;
+
+  const rolesNode = $("spend-roles");
+  rolesNode.replaceChildren(
+    el(
+      "div",
+      { class: "spend-pill" },
+      el("span", { class: "muted small" }, "Lead"),
+      el("strong", { class: "mono small" }, `est. ${formatUsd(sp.lead)}`),
+    ),
+    el(
+      "div",
+      { class: "spend-pill" },
+      el("span", { class: "muted small" }, "Workers"),
+      el("strong", { class: "mono small" }, `est. ${formatUsd(sp.workers)}`),
+    ),
+  );
+
+  const modelsNode = $("spend-models");
+  modelsNode.replaceChildren();
+  for (const [model, cost] of Object.entries(sp.byModel || {})) {
+    modelsNode.append(
+      el(
+        "div",
+        { class: "spend-pill" },
+        el("span", { class: "mono small" }, model),
+        el("strong", { class: "mono small" }, `est. ${formatUsd(cost)}`),
+      ),
+    );
+  }
+
+  const unpricedNode = $("spend-unpriced");
+  const unpricedRuns = sp.unpriced?.runs ?? 0;
+  const unpricedTokens = sp.unpriced?.tokens ?? 0;
+  if (unpricedRuns > 0) {
+    unpricedNode.hidden = false;
+    unpricedNode.textContent = `Unpriced runs (${unpricedRuns}): ${formatTokens(unpricedTokens)} tokens`;
+  } else {
+    unpricedNode.hidden = true;
+    unpricedNode.textContent = "";
+  }
+}
+
+let lastRenderedState = null;
+let activeTab = "flow";
+let boardFollow = true;
+let boardChannel = "";
+let lastAutoScrolledSeq = 0;
+const expandedPostSeqs = new Set();
+let graphLive = true;
+let graphReplaySeq = 0;
+let graphPlaying = false;
+let graphPlayTimer = null;
+let graphHideInactive = false;
+
+function postKindTone(kind) {
+  switch (kind) {
+    case "question":
+      return "status-amber";
+    case "defect":
+      return "status-red";
+    case "result":
+      return "status-green";
+    default:
+      return "status-neutral";
+  }
+}
+
+function memberStateTone(state) {
+  switch (state) {
+    case "working":
+      return "status-blue";
+    case "waiting":
+    case "paused":
+      return "status-amber";
+    case "killed":
+      return "status-red";
+    default:
+      return "status-neutral";
+  }
+}
+
+function exceedsSixLines(text) {
+  const str = String(text ?? "");
+  const lines = str.split("\n");
+  if (lines.length > 6) return true;
+  let visualLines = 0;
+  for (const line of lines) {
+    visualLines += Math.max(1, Math.ceil(line.length / 68));
+    if (visualLines > 6) return true;
+  }
+  return false;
+}
+
+function clipSingleLine(text, maxLen = 96) {
+  const clean = String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, maxLen - 1)}…`;
+}
+
+function formatRecipientLabel(raw) {
+  const s = String(raw ?? "").trim();
+  return s.toLowerCase() === "all" ? "everyone" : `@${s}`;
+}
+
+function syncSelectOptions(
+  selectNode,
+  defaultLabel,
+  values,
+  formatLabel = (v) => v,
+) {
+  if (!selectNode) return "";
+  const current = String(selectNode.value ?? "");
+  const preserved = values.includes(current) ? current : "";
+  selectNode.replaceChildren(
+    el(
+      "option",
+      { value: "", selected: preserved === "" ? true : false },
+      defaultLabel,
+    ),
+    ...values.map((v) =>
+      el(
+        "option",
+        { value: v, selected: preserved === v ? true : false },
+        formatLabel(v),
+      ),
+    ),
+  );
+  selectNode.value = preserved;
+  return preserved;
+}
+
+function syncFollowControls() {
+  const followBtn = $("board-follow");
+  const jumpBtn = $("board-jump-latest");
+  if (followBtn) {
+    followBtn.className = boardFollow
+      ? "control-btn small active"
+      : "control-btn small";
+    followBtn.setAttribute("aria-pressed", boardFollow ? "true" : "false");
+  }
+  if (jumpBtn) {
+    jumpBtn.hidden = boardFollow;
+  }
+}
+
+function scrollBoardToLatest() {
+  const list = $("board-list");
+  if (!list) return;
+  list.scrollTop = list.scrollHeight;
+  const last = list.children?.[list.children.length - 1];
+  if (last && typeof last.scrollIntoView === "function") {
+    last.scrollIntoView({ block: "end" });
+  }
+}
+
+function getStateChannels(state) {
+  if (Array.isArray(state?.channels) && state.channels.length > 0) {
+    return state.channels;
+  }
+  if (Array.isArray(state?.flow?.channels)) {
+    return [
+      { name: "main", archived: false },
+      ...state.flow.channels.map((c) => ({
+        name: c.name,
+        archived: Boolean(c.archived),
+      })),
+    ];
+  }
+  return [{ name: "main", archived: false }];
+}
+
+function renderBoard(state, forceScroll = false) {
+  const list = $("board-list");
+  const empty = $("board-empty");
+  const badge = $("tab-badge-board");
+  const channelsBar = $("board-channels");
+  if (!list || !empty) return;
+
+  const now = typeof state?.now === "number" ? state.now : Date.now();
+  const allPosts = Array.isArray(state?.posts)
+    ? state.posts
+    : Array.isArray(state?.flow?.posts)
+      ? state.flow.posts
+      : [];
+
+  if (badge) {
+    badge.hidden = allPosts.length === 0;
+    badge.textContent = String(allPosts.length);
+  }
+
+  const chList = getStateChannels(state);
+  const hasNonMainChannel = chList.some(
+    (c) => c && typeof c.name === "string" && c.name !== "main",
+  );
+  if (
+    !hasNonMainChannel ||
+    (boardChannel && !chList.some((c) => c.name === boardChannel))
+  ) {
+    boardChannel = "";
+  }
+  if (channelsBar) {
+    channelsBar.hidden = !hasNonMainChannel;
+    channelsBar.replaceChildren();
+    if (hasNonMainChannel) {
+      const items = [{ name: "", label: "All" }].concat(
+        chList.map((c) => ({
+          name: c.name,
+          label: `#${c.name}${c.archived ? " (archived)" : ""}`,
+        })),
+      );
+      for (const item of items) {
+        const isSelected = boardChannel === item.name;
+        channelsBar.append(
+          el(
+            "button",
+            {
+              type: "button",
+              class: isSelected
+                ? "control-btn small active"
+                : "control-btn small",
+              "data-channel": item.name,
+              "aria-pressed": isSelected ? "true" : "false",
+              onclick: () => {
+                boardChannel = item.name;
+                if (lastRenderedState) renderBoard(lastRenderedState, false);
+              },
+            },
+            item.label,
+          ),
+        );
+      }
+    }
+  }
+
+  const authors = [
+    ...new Set(
+      allPosts.map((p) => String(p.from ?? "").trim()).filter(Boolean),
+    ),
+  ].sort();
+  const recipients = [
+    ...new Set(
+      allPosts.flatMap((p) =>
+        Array.isArray(p.to)
+          ? p.to.map((r) => String(r ?? "").trim()).filter(Boolean)
+          : [],
+      ),
+    ),
+  ].sort();
+
+  const fromFilter = syncSelectOptions(
+    $("board-filter-from"),
+    "All authors",
+    authors,
+  );
+  const toFilter = syncSelectOptions(
+    $("board-filter-to"),
+    "All recipients",
+    recipients,
+    (v) => (String(v).toLowerCase() === "all" ? "everyone" : v),
+  );
+  const kindFilter = String($("board-filter-kind")?.value ?? "");
+  const query = String($("board-search")?.value ?? "")
+    .trim()
+    .toLowerCase();
+
+  const filtered = allPosts.filter((p) => {
+    const postChannel = p.channel || "main";
+    const isLeadMainBroadcast =
+      postChannel === "main" &&
+      String(p.from ?? "").toLowerCase() === "lead" &&
+      Array.isArray(p.to) &&
+      p.to.some((t) => String(t ?? "").toLowerCase() === "all");
+    if (boardChannel && postChannel !== boardChannel && !isLeadMainBroadcast) {
+      return false;
+    }
+    if (fromFilter && p.from !== fromFilter) return false;
+    if (toFilter && !(Array.isArray(p.to) && p.to.includes(toFilter))) {
+      return false;
+    }
+    if (kindFilter && p.kind !== kindFilter) return false;
+    if (query) {
+      const inText = String(p.text ?? "")
+        .toLowerCase()
+        .includes(query);
+      const inFrom = String(p.from ?? "")
+        .toLowerCase()
+        .includes(query);
+      const inTo = Array.isArray(p.to)
+        ? p.to.some((r) => {
+            const rl = String(r ?? "").toLowerCase();
+            return (
+              rl.includes(query) || (rl === "all" && "everyone".includes(query))
+            );
+          })
+        : false;
+      if (!inText && !inFrom && !inTo) return false;
+    }
+    return true;
+  });
+
+  list.replaceChildren();
+  empty.hidden = filtered.length > 0;
+  empty.textContent =
+    allPosts.length === 0 ? "No board posts yet." : "No matching posts.";
+
+  const postsDropped = Number(
+    state?.postsDropped ?? state?.flow?.postsDropped ?? 0,
+  );
+  if (postsDropped > 0 && filtered.length > 0) {
+    list.append(
+      el(
+        "div",
+        { class: "muted small mono" },
+        `${postsDropped} older posts not shown`,
+      ),
+    );
+  }
+
+  for (const post of filtered) {
+    const kind = post.kind || "note";
+    const rel = `${formatElapsed(Math.max(0, now - (post.at ?? now)))} ago`;
+    const recipientsText =
+      Array.isArray(post.to) && post.to.length > 0
+        ? `→ ${post.to.map(formatRecipientLabel).join(", ")}`
+        : "";
+    const isLong = exceedsSixLines(post.text);
+    const isExpanded = expandedPostSeqs.has(post.seq);
+
+    const row = el(
+      "div",
+      { class: "post-row" },
+      el(
+        "div",
+        { class: "post-header" },
+        el(
+          "div",
+          { class: "post-header-left" },
+          el("span", { class: "task-num mono muted" }, `#${post.seq}`),
+          el("span", { class: "row-title" }, post.from || "unknown"),
+          recipientsText
+            ? el("span", { class: "muted small mono" }, recipientsText)
+            : null,
+          post.channel && post.channel !== "main"
+            ? el("span", { class: "meta-chip mono muted" }, `#${post.channel}`)
+            : null,
+          typeof post.replyTo === "number"
+            ? el(
+                "span",
+                { class: "meta-chip mono muted" },
+                `↩ #${post.replyTo}`,
+              )
+            : null,
+        ),
+        el(
+          "div",
+          { class: "post-header-right" },
+          el("span", { class: "muted small mono" }, rel),
+          el("span", { class: `status-badge ${postKindTone(kind)}` }, kind),
+        ),
+      ),
+      el(
+        "div",
+        {
+          class: isLong && !isExpanded ? "post-text clamped" : "post-text",
+        },
+        String(post.text ?? ""),
+      ),
+      isLong
+        ? el(
+            "button",
+            {
+              type: "button",
+              class: "link-btn",
+              onclick: () => {
+                if (expandedPostSeqs.has(post.seq)) {
+                  expandedPostSeqs.delete(post.seq);
+                } else {
+                  expandedPostSeqs.add(post.seq);
+                }
+                if (lastRenderedState) renderBoard(lastRenderedState, false);
+              },
+            },
+            isExpanded ? "Show less" : "Show more",
+          )
+        : null,
+    );
+    list.append(row);
+  }
+
+  syncFollowControls();
+  const maxSeq = allPosts.length > 0 ? allPosts[allPosts.length - 1].seq : 0;
+  if (boardFollow && (forceScroll || maxSeq > lastAutoScrolledSeq)) {
+    lastAutoScrolledSeq = maxSeq;
+    scrollBoardToLatest();
+  }
+}
+
+function renderMemberGroup(
+  container,
+  list,
+  taskByN,
+  postBySeq,
+  now,
+  agentRoles = Object.create(null),
+) {
+  if (!container) return;
+  container.replaceChildren();
+  if (list.length === 0) {
+    container.append(el("p", { class: "muted small" }, "None."));
+    return;
+  }
+
+  for (const member of list) {
+    const mascot = getMascot(member.agent);
+    const task =
+      typeof member.taskN === "number" ? taskByN.get(member.taskN) : null;
+    const taskLabel =
+      typeof member.taskN === "number"
+        ? task?.title
+          ? `#${member.taskN} · ${task.title}`
+          : `#${member.taskN}`
+        : null;
+    const roundSuffix =
+      typeof member.round === "number" && member.round > 1
+        ? ` · round ${member.round}`
+        : "";
+    const baseModel = member.model || "inherit";
+    const effectiveDelegate = member.delegate || member.taskModel || null;
+    const modelText =
+      effectiveDelegate && effectiveDelegate !== baseModel
+        ? `${baseModel} → ${effectiveDelegate}`
+        : baseModel;
+    const memberWorktree = member.worktree || task?.worktree || null;
+    const stateLabel =
+      member.state === "paused"
+        ? `paused: ${member.reason || "error"}`
+        : member.state;
+    const activityLabel = member.lastActivityAt
+      ? `${formatElapsed(Math.max(0, now - member.lastActivityAt))} ago`
+      : "—";
+    const latestPost =
+      typeof member.lastPostSeq === "number"
+        ? postBySeq.get(member.lastPostSeq)
+        : null;
+
+    container.append(
+      el(
+        "div",
+        { class: "member-card" },
+        el(
+          "div",
+          { class: "member-top" },
+          el(
+            "div",
+            { class: "row-main" },
+            el(
+              "span",
+              { class: "agent-mascot", "aria-hidden": "true" },
+              mascot,
+            ),
+            el(
+              "span",
+              { class: "row-title" },
+              formatAgentLabel(member.agent || "worker", agentRoles),
+            ),
+            taskLabel
+              ? el("span", { class: "muted small" }, taskLabel + roundSuffix)
+              : null,
+          ),
+          el(
+            "div",
+            { class: "row-meta" },
+            el("span", { class: "meta-chip mono" }, modelText),
+            memberWorktree
+              ? el("span", { class: "meta-chip mono" }, `⎇ ${memberWorktree}`)
+              : null,
+            el("span", { class: "meta-chip mono muted" }, activityLabel),
+            el(
+              "span",
+              {
+                class: `status-badge ${memberStateTone(member.state)}`,
+                title: member.detail || undefined,
+              },
+              stateLabel,
+            ),
+          ),
+        ),
+        member.detail
+          ? el("div", { class: "muted small member-post" }, member.detail)
+          : null,
+        latestPost
+          ? el(
+              "div",
+              { class: "muted small member-post" },
+              `Latest #${latestPost.seq}: ${clipSingleLine(latestPost.text)}`,
+            )
+          : null,
+      ),
+    );
+  }
+}
+
+function renderMembers(state) {
+  const groups = $("members-groups");
+  const empty = $("members-empty");
+  const caption = $("members-caption");
+  const badge = $("tab-badge-members");
+  if (!groups || !empty) return;
+
+  const now = typeof state?.now === "number" ? state.now : Date.now();
+  const active = Array.isArray(state?.members?.active)
+    ? state.members.active
+    : [];
+  const standingBy = Array.isArray(state?.members?.standingBy)
+    ? state.members.standingBy
+    : [];
+  const retired = Array.isArray(state?.members?.retired)
+    ? state.members.retired
+    : [];
+  const total = active.length + standingBy.length + retired.length;
+
+  if (badge) {
+    badge.hidden = total === 0;
+    badge.textContent = String(total);
+  }
+  if (caption) {
+    caption.textContent = `${total} member${total === 1 ? "" : "s"}`;
+  }
+  empty.hidden = total > 0;
+  groups.hidden = total === 0;
+  if (total === 0) return;
+
+  $("members-active-count").textContent = `(${active.length})`;
+  $("members-standing-count").textContent = `(${standingBy.length})`;
+  $("members-retired-count").textContent = `(${retired.length})`;
+
+  const taskByN = new Map(
+    (Array.isArray(state?.taskBoard) ? state.taskBoard : []).map((t) => [
+      t.n,
+      t,
+    ]),
+  );
+  const allPosts = Array.isArray(state?.posts)
+    ? state.posts
+    : Array.isArray(state?.flow?.posts)
+      ? state.flow.posts
+      : [];
+  const postBySeq = new Map(allPosts.map((p) => [p.seq, p]));
+
+  const agentRoles = resolveStateAgentRoles(state);
+  renderMemberGroup(
+    $("members-active"),
+    active,
+    taskByN,
+    postBySeq,
+    now,
+    agentRoles,
+  );
+  renderMemberGroup(
+    $("members-standing"),
+    standingBy,
+    taskByN,
+    postBySeq,
+    now,
+    agentRoles,
+  );
+  renderMemberGroup(
+    $("members-retired"),
+    retired,
+    taskByN,
+    postBySeq,
+    now,
+    agentRoles,
+  );
+}
+
+function getStatePosts(state) {
+  if (Array.isArray(state?.posts)) return state.posts;
+  if (Array.isArray(state?.flow?.posts)) return state.flow.posts;
+  return [];
+}
+
+function getGraphPosts(state) {
+  if (Array.isArray(state?.graphPosts)) return state.graphPosts;
+  return getStatePosts(state);
+}
+
+function stopGraphPlayback() {
+  graphPlaying = false;
+  if (graphPlayTimer !== null) {
+    if (typeof clearInterval === "function") {
+      clearInterval(graphPlayTimer);
+    }
+    graphPlayTimer = null;
+  }
+}
+
+function computeGraphFromPosts(posts, uptoSeq) {
+  const hasCap = typeof uptoSeq === "number" && Number.isFinite(uptoSeq);
+  const nodePosts = new Map();
+  const edgeMap = new Map();
+
+  for (const post of posts) {
+    if (hasCap && post.seq > uptoSeq) continue;
+    const from = String(post.from ?? "")
+      .trim()
+      .replace(/^@+/, "")
+      .toLowerCase();
+    const validFrom = from.length > 0 && from !== "all";
+    if (validFrom) {
+      nodePosts.set(from, (nodePosts.get(from) ?? 0) + 1);
+    }
+    const seenTo = new Set();
+    const rawTo = Array.isArray(post.to) ? post.to : [];
+    for (const item of rawTo) {
+      const to = String(item ?? "")
+        .trim()
+        .replace(/^@+/, "")
+        .toLowerCase();
+      if (to.length === 0 || to === "all" || seenTo.has(to)) continue;
+      seenTo.add(to);
+      if (!nodePosts.has(to)) {
+        nodePosts.set(to, 0);
+      }
+      if (validFrom) {
+        const key = `${from}\0${to}`;
+        const existing = edgeMap.get(key);
+        if (existing) existing.count += 1;
+        else edgeMap.set(key, { from, to, count: 1 });
+      }
+    }
+  }
+
+  const nodes = Array.from(nodePosts.entries())
+    .map(([id, postsCount]) => ({ id, posts: postsCount }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  const edges = Array.from(edgeMap.values()).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    if (a.from !== b.from) return a.from < b.from ? -1 : 1;
+    if (a.to !== b.to) return a.to < b.to ? -1 : 1;
+    return 0;
+  });
+
+  return { nodes, edges };
+}
+
+function collectInactiveHandles(state) {
+  const memberById = new Map();
+  for (const group of [
+    state?.members?.active,
+    state?.members?.standingBy,
+    state?.members?.retired,
+  ]) {
+    if (!Array.isArray(group)) continue;
+    for (const m of group) {
+      if (m && typeof m.id === "string") {
+        memberById.set(m.id, m);
+      }
+    }
+  }
+
+  const runs = Array.isArray(state?.runs)
+    ? state.runs
+    : Array.isArray(state?.flow?.runs)
+      ? state.flow.runs
+      : [];
+
+  const latestStateByHandle = new Map();
+  if (runs.length > 0) {
+    for (const run of runs) {
+      if (!run || run.role === "lead") continue;
+      const h = String(run.agent ?? "")
+        .trim()
+        .toLowerCase();
+      if (!h) continue;
+      const member = memberById.get(run.id);
+      const st =
+        member?.state ??
+        (run.memberState === "killed" || run.memberState === "retired"
+          ? run.memberState
+          : run.paused
+            ? "paused"
+            : run.status === "running"
+              ? "working"
+              : run.status === "error"
+                ? "retired"
+                : "waiting");
+      latestStateByHandle.set(h, st);
+    }
+  } else {
+    for (const group of [
+      state?.members?.retired,
+      state?.members?.standingBy,
+      state?.members?.active,
+    ]) {
+      if (!Array.isArray(group)) continue;
+      for (const m of group) {
+        const h = String(m?.agent ?? "")
+          .trim()
+          .toLowerCase();
+        if (h && typeof m?.state === "string") {
+          latestStateByHandle.set(h, m.state);
+        }
+      }
+    }
+  }
+
+  const inactiveHandles = new Set();
+  for (const [h, st] of latestStateByHandle.entries()) {
+    if (st === "killed" || st === "retired") {
+      inactiveHandles.add(h);
+    }
+  }
+  return inactiveHandles;
+}
+
+function syncGraphControls(minSeq, latestSeq, effectiveSeq, hasPosts) {
+  if (!hasPosts && graphPlaying) {
+    stopGraphPlayback();
+  }
+  const slider = $("graph-seq-slider");
+  if (slider) {
+    slider.setAttribute("min", String(minSeq));
+    slider.setAttribute("max", String(latestSeq));
+    slider.setAttribute("value", String(effectiveSeq));
+    slider.value = String(effectiveSeq);
+    slider.disabled = !hasPosts;
+  }
+  const seqLabel = $("graph-seq-label");
+  if (seqLabel) {
+    seqLabel.textContent = !hasPosts
+      ? "seq 0 / 0"
+      : graphLive
+        ? `Live · seq ${effectiveSeq}/${latestSeq}`
+        : `seq ${effectiveSeq}/${latestSeq}`;
+  }
+  const stepBackBtn = $("graph-step-back");
+  if (stepBackBtn) {
+    stepBackBtn.disabled = !hasPosts || effectiveSeq <= minSeq;
+  }
+  const stepFwdBtn = $("graph-step-forward");
+  if (stepFwdBtn) {
+    stepFwdBtn.disabled = !hasPosts || effectiveSeq >= latestSeq;
+  }
+  const liveBtn = $("graph-live");
+  if (liveBtn) {
+    liveBtn.disabled = !hasPosts;
+    liveBtn.className = graphLive
+      ? "control-btn small active"
+      : "control-btn small";
+    liveBtn.setAttribute("aria-pressed", graphLive ? "true" : "false");
+  }
+  const playBtn = $("graph-play-pause");
+  if (playBtn) {
+    playBtn.disabled = !hasPosts;
+    playBtn.className = graphPlaying
+      ? "control-btn small active"
+      : "control-btn small";
+    playBtn.setAttribute("aria-pressed", graphPlaying ? "true" : "false");
+    playBtn.textContent = graphPlaying ? "Pause" : "Play";
+  }
+  const hideBtn = $("graph-hide-inactive");
+  if (hideBtn) {
+    hideBtn.className = graphHideInactive
+      ? "control-btn small active"
+      : "control-btn small";
+    hideBtn.setAttribute("aria-pressed", graphHideInactive ? "true" : "false");
+  }
+}
+
+function shortenGraphLabel(label, maxChars) {
+  const str = String(label ?? "");
+  const cap = Math.max(2, Math.floor(maxChars));
+  if (str.length <= cap) return str;
+  return `${str.slice(0, cap - 1)}…`;
+}
+
+function renderGraph(state) {
+  const container = $("graph-container");
+  const empty = $("graph-empty");
+  if (!container || !empty) return;
+
+  const allPosts = getGraphPosts(state);
+  const hasPosts = allPosts.length > 0;
+  const minSeq = hasPosts ? allPosts[0].seq : 1;
+  const latestSeq = hasPosts ? allPosts[allPosts.length - 1].seq : 1;
+  const effectiveSeq =
+    !hasPosts || graphLive
+      ? latestSeq
+      : Math.min(latestSeq, Math.max(minSeq, graphReplaySeq || latestSeq));
+  if (graphLive) {
+    graphReplaySeq = latestSeq;
+  }
+
+  syncGraphControls(minSeq, latestSeq, effectiveSeq, hasPosts);
+
+  const rangeNote = $("graph-range-note");
+  if (rangeNote) {
+    const showRangeNote =
+      hasPosts &&
+      (minSeq > 1 ||
+        (Number(state?.postsDropped) || 0) > 0 ||
+        (Array.isArray(state?.posts) && state.posts.length < allPosts.length));
+    rangeNote.hidden = !showRangeNote;
+    rangeNote.textContent = showRangeNote
+      ? `graph covers posts #${minSeq}-#${latestSeq}`
+      : "";
+  }
+
+  const canUseServerGraph =
+    graphLive &&
+    state?.mentionGraph &&
+    Array.isArray(state.mentionGraph.nodes) &&
+    Array.isArray(state.mentionGraph.edges) &&
+    (Array.isArray(state?.graphPosts) || minSeq === 1);
+  const baseGraph = canUseServerGraph
+    ? state.mentionGraph
+    : computeGraphFromPosts(allPosts, effectiveSeq);
+
+  const inactive = graphHideInactive ? collectInactiveHandles(state) : null;
+  const nodes = inactive
+    ? baseGraph.nodes.filter((n) => !inactive.has(n.id))
+    : baseGraph.nodes;
+  const edges = inactive
+    ? baseGraph.edges.filter(
+        (e) => !inactive.has(e.from) && !inactive.has(e.to),
+      )
+    : baseGraph.edges;
+
+  container.replaceChildren();
+  empty.hidden = nodes.length > 0;
+  if (nodes.length === 0) return;
+
+  const width = Math.max(200, Math.round(container.clientWidth || 360));
+  const height = 260;
+  const cx = width / 2;
+  const cy = height / 2;
+  const nodeR = 18;
+  const sideGutter = Math.min(64, Math.max(52, Math.round(width * 0.24)));
+  const baseR = Math.min(width, height) * 0.33;
+  const ringRx =
+    nodes.length <= 1
+      ? 0
+      : Math.min(baseR, Math.max(28, cx - nodeR - sideGutter));
+  const ringRy = nodes.length <= 1 ? 0 : baseR;
+
+  const posById = new Map();
+  for (let i = 0; i < nodes.length; i += 1) {
+    const angle = -Math.PI / 2 + (2 * Math.PI * i) / Math.max(1, nodes.length);
+    const x = cx + ringRx * Math.cos(angle);
+    const y = cy + ringRy * Math.sin(angle);
+    posById.set(nodes[i].id, { x, y, angle });
+  }
+
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    width: String(width),
+    height: String(height),
+    class: "graph-svg",
+    role: "img",
+    "aria-label": "Mention graph",
+  });
+
+  svg.append(
+    svgEl(
+      "defs",
+      {},
+      svgEl(
+        "marker",
+        {
+          id: "graph-arrowhead",
+          viewBox: "0 0 10 10",
+          refX: "9",
+          refY: "5",
+          markerWidth: "6",
+          markerHeight: "6",
+          orient: "auto-start-reverse",
+        },
+        svgEl("path", {
+          d: "M 0 1 L 10 5 L 0 9 z",
+          class: "graph-arrow",
+        }),
+      ),
+    ),
+  );
+
+  const edgeKeys = new Set(edges.map((e) => `${e.from}\0${e.to}`));
+  const maxCount = Math.max(1, ...edges.map((e) => e.count));
+  const edgesGroup = svgEl("g", { class: "graph-layer-edges" });
+  const weightsGroup = svgEl("g", { class: "graph-layer-weights" });
+
+  for (const edge of edges) {
+    const src = posById.get(edge.from);
+    const dst = posById.get(edge.to);
+    if (!src || !dst) continue;
+    const strokeWidth =
+      maxCount <= 1 ? 2 : 1.5 + ((edge.count - 1) / (maxCount - 1)) * 3.0;
+
+    if (edge.from === edge.to) {
+      const loopR = 12;
+      const lx = src.x;
+      const ly = src.y - nodeR;
+      edgesGroup.append(
+        svgEl(
+          "path",
+          {
+            d: `M ${(lx - 6).toFixed(1)} ${ly.toFixed(1)} A ${loopR} ${loopR} 0 1 1 ${(lx + 6).toFixed(1)} ${ly.toFixed(1)}`,
+            class: "graph-edge",
+            "data-from": edge.from,
+            "data-to": edge.to,
+            "data-count": String(edge.count),
+            "stroke-width": strokeWidth.toFixed(2),
+            "marker-end": "url(#graph-arrowhead)",
+          },
+          svgEl("title", {}, `${edge.from} → ${edge.to} ×${edge.count}`),
+        ),
+      );
+      weightsGroup.append(
+        svgEl(
+          "text",
+          {
+            x: lx.toFixed(1),
+            y: Math.max(10, ly - loopR * 2 - 2).toFixed(1),
+            "text-anchor": "middle",
+            class: "graph-weight",
+            "data-from": edge.from,
+            "data-to": edge.to,
+            "data-count": String(edge.count),
+          },
+          String(edge.count),
+        ),
+      );
+      continue;
+    }
+
+    const dx = dst.x - src.x;
+    const dy = dst.y - src.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const hasReverse = edgeKeys.has(`${edge.to}\0${edge.from}`);
+    const perpOffset = hasReverse ? 3.5 : 0;
+    const ox = -uy * perpOffset;
+    const oy = ux * perpOffset;
+    const x1 = src.x + ux * (nodeR + 2) + ox;
+    const y1 = src.y + uy * (nodeR + 2) + oy;
+    const x2 = dst.x - ux * (nodeR + 5) + ox;
+    const y2 = dst.y - uy * (nodeR + 5) + oy;
+
+    edgesGroup.append(
+      svgEl(
+        "line",
+        {
+          x1: x1.toFixed(1),
+          y1: y1.toFixed(1),
+          x2: x2.toFixed(1),
+          y2: y2.toFixed(1),
+          class: "graph-edge",
+          "data-from": edge.from,
+          "data-to": edge.to,
+          "data-count": String(edge.count),
+          "stroke-width": strokeWidth.toFixed(2),
+          "marker-end": "url(#graph-arrowhead)",
+        },
+        svgEl("title", {}, `${edge.from} → ${edge.to} ×${edge.count}`),
+      ),
+    );
+    const labelOffset = hasReverse ? 9 : 7;
+    const wx = x1 + (x2 - x1) * 0.56 - uy * labelOffset;
+    const wy = y1 + (y2 - y1) * 0.56 + ux * labelOffset + 3;
+    weightsGroup.append(
+      svgEl(
+        "text",
+        {
+          x: wx.toFixed(1),
+          y: wy.toFixed(1),
+          "text-anchor": "middle",
+          class: "graph-weight",
+          "data-from": edge.from,
+          "data-to": edge.to,
+          "data-count": String(edge.count),
+        },
+        String(edge.count),
+      ),
+    );
+  }
+  svg.append(edgesGroup, weightsGroup);
+
+  const nodesGroup = svgEl("g", { class: "graph-layer-nodes" });
+  const pad = 6;
+  const charWidth = 6.8;
+  for (const node of nodes) {
+    const pos = posById.get(node.id);
+    if (!pos) continue;
+    const labelDist = nodeR + 10;
+    const lx = nodes.length <= 1 ? 0 : Math.cos(pos.angle) * labelDist;
+    const ly =
+      nodes.length <= 1 ? nodeR + 14 : Math.sin(pos.angle) * labelDist + 4;
+    const anchor =
+      nodes.length > 1 && Math.cos(pos.angle) > 0.35
+        ? "start"
+        : nodes.length > 1 && Math.cos(pos.angle) < -0.35
+          ? "end"
+          : "middle";
+    const absLx = pos.x + lx;
+    const availPx =
+      anchor === "start"
+        ? width - pad - absLx
+        : anchor === "end"
+          ? absLx - pad
+          : 2 * Math.min(absLx - pad, width - pad - absLx);
+    const displayLabel = shortenGraphLabel(node.id, availPx / charWidth);
+
+    nodesGroup.append(
+      svgEl(
+        "g",
+        {
+          class: "graph-node",
+          "data-agent": node.id,
+          "data-posts": String(node.posts),
+          transform: `translate(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})`,
+        },
+        svgEl("title", {}, node.id),
+        svgEl("circle", {
+          r: String(nodeR),
+          class: "graph-circle",
+        }),
+        svgEl(
+          "text",
+          {
+            y: "4",
+            "text-anchor": "middle",
+            class: "graph-count",
+          },
+          String(node.posts),
+        ),
+        svgEl(
+          "text",
+          {
+            x: lx.toFixed(1),
+            y: ly.toFixed(1),
+            "text-anchor": anchor,
+            class: "graph-label",
+          },
+          displayLabel,
+        ),
+      ),
+    );
+  }
+  svg.append(nodesGroup);
+  container.append(svg);
+}
+
+function renderOverview(state) {
+  const empty = $("overview-empty");
+  const membersSec = $("overview-members-section");
+  const membersList = $("overview-members");
+  const questionsSec = $("overview-questions-section");
+  const questionsList = $("overview-questions");
+  const defectsSec = $("overview-defects-section");
+  const defectsList = $("overview-defects");
+  const stallsSec = $("overview-stalls-section");
+  const stallsList = $("overview-stalls");
+  if (
+    !empty ||
+    !membersSec ||
+    !membersList ||
+    !questionsSec ||
+    !questionsList ||
+    !defectsSec ||
+    !defectsList ||
+    !stallsSec ||
+    !stallsList
+  ) {
+    return;
+  }
+
+  const agentRoles = resolveStateAgentRoles(state);
+  const ov = state?.overview || {};
+  const members = Array.isArray(ov.members) ? ov.members : [];
+  const openQuestions = Array.isArray(ov.openQuestions) ? ov.openQuestions : [];
+  const openDefects = Array.isArray(ov.openDefects) ? ov.openDefects : [];
+  const stallRows = Array.isArray(ov.stalls) ? ov.stalls : [];
+
+  const hasAny =
+    members.length > 0 ||
+    openQuestions.length > 0 ||
+    openDefects.length > 0 ||
+    stallRows.length > 0;
+  empty.hidden = hasAny;
+
+  membersSec.hidden = members.length === 0;
+  membersList.replaceChildren();
+  for (const m of members) {
+    const mascot = getMascot(m.agent);
+    membersList.append(
+      el(
+        "div",
+        { class: "row-item" },
+        el(
+          "div",
+          { class: "row-main" },
+          el("span", { class: "agent-mascot", "aria-hidden": "true" }, mascot),
+          el(
+            "span",
+            { class: "row-title" },
+            formatAgentLabel(m.agent || "worker", agentRoles),
+          ),
+          m.line ? el("span", { class: "muted small" }, `· ${m.line}`) : null,
+        ),
+        el(
+          "div",
+          { class: "row-meta" },
+          el(
+            "span",
+            { class: `status-badge ${memberStateTone(m.state)}` },
+            m.state || "working",
+          ),
+        ),
+      ),
+    );
+  }
+
+  questionsSec.hidden = openQuestions.length === 0;
+  questionsList.replaceChildren();
+  for (const q of openQuestions) {
+    questionsList.append(
+      el(
+        "div",
+        { class: "post-row" },
+        el(
+          "div",
+          { class: "post-header" },
+          el(
+            "div",
+            { class: "post-header-left" },
+            el("span", { class: "task-num mono muted" }, `#${q.seq}`),
+            el("span", { class: "row-title" }, q.from || "unknown"),
+          ),
+          el(
+            "div",
+            { class: "post-header-right" },
+            el("span", { class: "status-badge status-amber" }, "question"),
+          ),
+        ),
+        el("div", { class: "post-text" }, String(q.text ?? "")),
+      ),
+    );
+  }
+
+  defectsSec.hidden = openDefects.length === 0;
+  defectsList.replaceChildren();
+  for (const d of openDefects) {
+    const recipientsText =
+      Array.isArray(d.to) && d.to.length > 0
+        ? `→ ${d.to.map(formatRecipientLabel).join(", ")}`
+        : "";
+    defectsList.append(
+      el(
+        "div",
+        { class: "post-row" },
+        el(
+          "div",
+          { class: "post-header" },
+          el(
+            "div",
+            { class: "post-header-left" },
+            el("span", { class: "task-num mono muted" }, `#${d.seq}`),
+            el("span", { class: "row-title" }, d.from || "unknown"),
+            recipientsText
+              ? el("span", { class: "muted small mono" }, recipientsText)
+              : null,
+          ),
+          el(
+            "div",
+            { class: "post-header-right" },
+            el("span", { class: "status-badge status-red" }, "defect"),
+          ),
+        ),
+        el("div", { class: "post-text" }, String(d.text ?? "")),
+      ),
+    );
+  }
+
+  stallsSec.hidden = stallRows.length === 0;
+  stallsList.replaceChildren();
+  for (const s of stallRows) {
+    const mascot = getMascot(s.agent);
+    const tone = s.state === "stalled" ? "status-red" : "status-amber";
+    stallsList.append(
+      el(
+        "div",
+        { class: "row-item" },
+        el(
+          "div",
+          { class: "row-main" },
+          el("span", { class: "agent-mascot", "aria-hidden": "true" }, mascot),
+          el(
+            "span",
+            { class: "row-title" },
+            formatAgentLabel(s.agent || "worker", agentRoles),
+          ),
+          typeof s.taskN === "number"
+            ? el(
+                "span",
+                { class: "muted small" },
+                s.title ? `#${s.taskN} · ${s.title}` : `#${s.taskN}`,
+              )
+            : null,
+        ),
+        el(
+          "div",
+          { class: "row-meta" },
+          el(
+            "span",
+            { class: "meta-chip mono muted" },
+            `${formatElapsed(s.idleMs ?? 0)} idle`,
+          ),
+          el("span", { class: `status-badge ${tone}` }, s.state || "quiet"),
+        ),
+      ),
+    );
+  }
+}
+
+function setActiveTab(tab) {
+  activeTab = tab;
+  const tabs = ["flow", "board", "members", "graph", "overview"];
+  for (const name of tabs) {
+    const btn = $(`tab-btn-${name}`);
+    const pane = $(`tab-pane-${name}`);
+    const isActive = name === tab;
+    if (btn) {
+      btn.className = isActive ? "tab-btn active" : "tab-btn";
+      btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    }
+    if (pane) {
+      pane.hidden = !isActive;
+    }
+  }
+  if (tab === "flow" && lastRenderedState?.hasFlow) {
+    renderBurnDownSvg(lastRenderedState.burnDown, lastRenderedState.totalTasks);
+  } else if (tab === "board" && boardFollow) {
+    scrollBoardToLatest();
+  } else if (tab === "graph" && lastRenderedState?.hasFlow) {
+    renderGraph(lastRenderedState);
+  }
+}
+
+function wireBoardAndTabControls() {
+  for (const name of ["flow", "board", "members", "graph", "overview"]) {
+    const btn = $(`tab-btn-${name}`);
+    if (btn) {
+      btn.addEventListener("click", () => setActiveTab(name));
+    }
+  }
+
+  const search = $("board-search");
+  if (search) {
+    search.addEventListener("input", () => {
+      if (lastRenderedState) renderBoard(lastRenderedState, false);
+    });
+  }
+  for (const id of [
+    "board-filter-from",
+    "board-filter-to",
+    "board-filter-kind",
+  ]) {
+    const sel = $(id);
+    if (sel) {
+      sel.addEventListener("change", () => {
+        if (lastRenderedState) renderBoard(lastRenderedState, false);
+      });
+    }
+  }
+
+  const followBtn = $("board-follow");
+  if (followBtn) {
+    followBtn.addEventListener("click", () => {
+      boardFollow = !boardFollow;
+      syncFollowControls();
+      if (boardFollow) scrollBoardToLatest();
+    });
+  }
+
+  const jumpBtn = $("board-jump-latest");
+  if (jumpBtn) {
+    jumpBtn.addEventListener("click", () => {
+      boardFollow = true;
+      syncFollowControls();
+      scrollBoardToLatest();
+    });
+  }
+
+  const boardList = $("board-list");
+  if (boardList) {
+    boardList.addEventListener("scroll", () => {
+      const distanceFromBottom =
+        boardList.scrollHeight - boardList.scrollTop - boardList.clientHeight;
+      if (distanceFromBottom > 24 && boardFollow) {
+        boardFollow = false;
+        syncFollowControls();
+      }
+    });
+  }
+
+  const graphSlider = $("graph-seq-slider");
+  if (graphSlider) {
+    const onSlider = () => {
+      const posts = getGraphPosts(lastRenderedState);
+      if (posts.length === 0) return;
+      stopGraphPlayback();
+      graphLive = false;
+      graphReplaySeq = Math.max(1, Number(graphSlider.value) || 1);
+      if (lastRenderedState) renderGraph(lastRenderedState);
+    };
+    graphSlider.addEventListener("input", onSlider);
+    graphSlider.addEventListener("change", onSlider);
+  }
+
+  const stepBackBtn = $("graph-step-back");
+  if (stepBackBtn) {
+    stepBackBtn.addEventListener("click", () => {
+      if (stepBackBtn.disabled) return;
+      const posts = getGraphPosts(lastRenderedState);
+      if (posts.length === 0) return;
+      const minSeq = posts[0].seq;
+      const latestSeq = posts[posts.length - 1].seq;
+      const cur = graphLive ? latestSeq : graphReplaySeq || latestSeq;
+      if (cur <= minSeq) return;
+      stopGraphPlayback();
+      graphLive = false;
+      graphReplaySeq = Math.max(minSeq, cur - 1);
+      if (lastRenderedState) renderGraph(lastRenderedState);
+    });
+  }
+
+  const stepFwdBtn = $("graph-step-forward");
+  if (stepFwdBtn) {
+    stepFwdBtn.addEventListener("click", () => {
+      if (stepFwdBtn.disabled) return;
+      const posts = getGraphPosts(lastRenderedState);
+      if (posts.length === 0) return;
+      const minSeq = posts[0].seq;
+      const latestSeq = posts[posts.length - 1].seq;
+      const cur = graphLive ? latestSeq : graphReplaySeq || minSeq;
+      if (cur >= latestSeq) return;
+      stopGraphPlayback();
+      graphReplaySeq = Math.min(latestSeq, cur + 1);
+      graphLive = graphReplaySeq >= latestSeq;
+      if (lastRenderedState) renderGraph(lastRenderedState);
+    });
+  }
+
+  const liveBtn = $("graph-live");
+  if (liveBtn) {
+    liveBtn.addEventListener("click", () => {
+      const posts = getGraphPosts(lastRenderedState);
+      if (posts.length === 0) return;
+      stopGraphPlayback();
+      graphLive = true;
+      graphReplaySeq = posts[posts.length - 1].seq;
+      if (lastRenderedState) renderGraph(lastRenderedState);
+    });
+  }
+
+  const playPauseBtn = $("graph-play-pause");
+  if (playPauseBtn) {
+    playPauseBtn.addEventListener("click", () => {
+      const posts = getGraphPosts(lastRenderedState);
+      if (posts.length === 0) {
+        stopGraphPlayback();
+        return;
+      }
+      if (graphPlaying) {
+        stopGraphPlayback();
+        if (lastRenderedState) renderGraph(lastRenderedState);
+        return;
+      }
+      const minSeq = posts[0].seq;
+      const latestSeq = posts[posts.length - 1].seq;
+      if (graphLive || graphReplaySeq >= latestSeq) {
+        graphReplaySeq = minSeq;
+      }
+      graphLive = false;
+      graphPlaying = true;
+      graphPlayTimer = setInterval(() => {
+        const curPosts = getGraphPosts(lastRenderedState);
+        const maxSeq =
+          curPosts.length > 0 ? curPosts[curPosts.length - 1].seq : 1;
+        if (graphReplaySeq >= maxSeq) {
+          stopGraphPlayback();
+          graphLive = true;
+        } else {
+          graphReplaySeq += 1;
+          if (graphReplaySeq >= maxSeq) {
+            stopGraphPlayback();
+            graphLive = true;
+          }
+        }
+        if (lastRenderedState) renderGraph(lastRenderedState);
+      }, 650);
+      if (lastRenderedState) renderGraph(lastRenderedState);
+    });
+  }
+
+  const hideInactiveBtn = $("graph-hide-inactive");
+  if (hideInactiveBtn) {
+    hideInactiveBtn.addEventListener("click", () => {
+      graphHideInactive = !graphHideInactive;
+      if (lastRenderedState) renderGraph(lastRenderedState);
+    });
+  }
+}
+
+function renderState(state) {
+  lastRenderedState = state;
+  const hasFlow = Boolean(state?.hasFlow && state?.flow);
+  $("empty-state").hidden = hasFlow;
+  $("flow-view").hidden = !hasFlow;
+  if (!hasFlow) return;
+
+  const flow = state.flow;
+  $("flow-title").textContent =
+    state.title || flow.title || "Orchestrator Flow";
+  const cidShort = state.conversationId
+    ? state.conversationId.slice(0, 8)
+    : "local";
+  $("flow-meta").textContent = `v${state.version || "0.2.0"} · ${cidShort}`;
+
+  $("accepted-summary").textContent =
+    `accepted ${state.accepted ?? 0} of ${state.totalTasks ?? 0}`;
+
+  const totalUsd = state.spend?.total ?? 0;
+  const unpricedTokens = state.spend?.unpriced?.tokens ?? 0;
+  $("cost-summary").textContent =
+    totalUsd === 0 && unpricedTokens > 0
+      ? `est. $0.00 · ${formatTokens(unpricedTokens)} tkn`
+      : `est. ${formatUsd(totalUsd)}`;
+
+  renderPhasePills(state.phase || flow.phase || "plan", Boolean(flow.closedAt));
+
+  const postCount = Array.isArray(state.posts)
+    ? state.posts.length
+    : Array.isArray(flow.posts)
+      ? flow.posts.length
+      : 0;
+  const hasPosts =
+    postCount > 0 || (state.postsDropped ?? flow.postsDropped ?? 0) > 0;
+  const hasMemberEvents =
+    Boolean(state.hasMemberEvents || flow.hasMemberEvents) ||
+    (Array.isArray(flow.runs) &&
+      flow.runs.some(
+        (r) =>
+          Boolean(r.paused) ||
+          r.memberState === "killed" ||
+          r.memberState === "retired",
+      ));
+  const hasNonMainChannel = getStateChannels(state).some(
+    (c) => c && typeof c.name === "string" && c.name !== "main",
+  );
+  const showTabs = hasPosts || hasMemberEvents || hasNonMainChannel;
+  const tabsEl = $("panel-tabs");
+  if (tabsEl) {
+    tabsEl.hidden = !showTabs;
+  }
+  if (!showTabs && activeTab !== "flow") {
+    setActiveTab("flow");
+  }
+
+  const replanCount = state.burnDown?.replans?.length ?? 0;
+  $("burndown-caption").textContent =
+    `${state.remaining ?? 0} remaining${replanCount > 0 ? ` · ${replanCount} re-plan${replanCount === 1 ? "" : "s"}` : ""}`;
+  renderBurnDownSvg(state.burnDown, state.totalTasks);
+  renderTaskBoard(Array.isArray(state.taskBoard) ? state.taskBoard : []);
+  renderAgents(
+    Array.isArray(state.runs) ? state.runs : [],
+    state.members,
+    resolveStateAgentRoles(state),
+  );
+  renderSpend(state.spend);
+  renderBoard(state);
+  renderMembers(state);
+  renderGraph(state);
+  renderOverview(state);
+}
+
+wireBoardAndTabControls();
+
+async function refresh() {
+  const params = new URLSearchParams();
+  if (sidecar?.conversationId) {
+    params.set("cid", sidecar.conversationId);
+  }
+  if (typeof sidecar?.getWorkspaceUris === "function") {
+    try {
+      const uris = await sidecar.getWorkspaceUris();
+      if (Array.isArray(uris) && typeof uris[0] === "string" && uris[0]) {
+        params.set("workspaceUri", uris[0]);
+      }
+    } catch {
+      // Proceed without workspaceUri if host bridge call fails.
+    }
+  }
+  const qs = params.toString();
+  const query = qs ? `?${qs}` : "";
+  try {
+    const state = await callApi(`/api/state${query}`);
+    renderState(state);
+  } catch {
+    // Keep last rendered state on transient poll error.
+  }
+}
+
+window.addEventListener("resize", () => {
+  if (lastRenderedState?.hasFlow) {
+    renderBurnDownSvg(lastRenderedState.burnDown, lastRenderedState.totalTasks);
+    if (activeTab === "graph") {
+      renderGraph(lastRenderedState);
+    }
+  }
+});
+
+refresh();
+setInterval(refresh, 2500);
